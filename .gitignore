@@ -1,0 +1,6 @@
+*.TIF
+*.pkl
+__pycache__
+*.blend
+*.blend1
+.DS_Store
