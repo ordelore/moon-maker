@@ -1,40 +1,43 @@
 import math
 
-def lat_lon_to_uv(lat, lon, wrap=True):
-    # wrapping latlon comes from https://gist.github.com/missinglink/d0a085188a8eab2ca66db385bb7c023a
-    if wrap:
-        if lat > 90:
-            lat = 180 - lat
-            lon = lon + 180
-        elif lat < -90:
-            lat = -180 - lat
-            lon = lon + 180
-        lon = (lon + 180) % 360 - 180
-    
+def lat_lon_to_uv(lat, lon):
     return (lon / 360 + 0.5, 0.5 + lat / 180)
 
 def process_pixel(lat, lon, img, center_lat_lon, base_radius, scale, offset):
+    # sanitize latitude and longitude
+    if lat > 90:
+        lat = 180 - lat
+        lon += 180
+    elif lat < -90:
+        lat = -180 - lat
+        lon += 180
+    lon = (lon + 180) % 360 - 180
     # convert the lat lon to uv coordinates
     uvs = lat_lon_to_uv(lat, lon)
     dem_x = (img.size[0] * uvs[0]) % img.size[0]
     dem_y = (img.size[1] - img.size[1] * uvs[1]) % img.size[1]
-    # rotate the coordinates so the mesh's center is at (0,0,0)
-    if offset:
-        global_lon = lon - center_lat_lon[1]
-        global_lat = lat - center_lat_lon[0]
-    else:
-        global_lon = lon
-        global_lat = lat
+    
     dem_pixel = (img.getpixel((dem_x, dem_y)) + base_radius) * scale
-    global_x = dem_pixel * math.cos(math.radians(global_lat)) * math.cos(math.radians(global_lon))
-    global_y = dem_pixel * math.cos(math.radians(global_lat)) * math.sin(math.radians(global_lon))
-    global_z = dem_pixel * math.sin(math.radians(global_lat))
+    x = dem_pixel * math.cos(math.radians(lat)) * math.cos(math.radians(lon))
+    y = dem_pixel * math.cos(math.radians(lat)) * math.sin(math.radians(lon))
+    z = dem_pixel * math.sin(math.radians(lat))
+    if not offset:
+        return (x,y,z)
     if offset != 0:
-        return (global_y, global_z, global_x - (offset + base_radius) * scale)
-    else:
-        return (global_x, global_y, global_z)
+        # rotate the point by -center lon degrees around the z axis
+        rot = math.radians(center_lat_lon[1])
+        rotated_x = x * math.cos(rot) + y * math.sin(rot)
+        rotated_y = -x * math.sin(rot) + y * math.cos(rot)
+        rotated_z = z
+        # rotate the point by -(90 - center lat) degrees around the y axis
+        rot = math.radians(-(90 - center_lat_lon[0]))
+        global_x = rotated_x * math.cos(rot) + rotated_z * math.sin(rot)
+        global_y = rotated_y
+        global_z = -rotated_x * math.sin(rot) + rotated_z * math.cos(rot)
+        
+        return (global_x, global_y, global_z - (offset + base_radius) * scale)
 
-def create_mesh_file(center_lat_lon, angular_extents, pixels_per_degree, dem_path, base_sphere_radius, scale, img_path, outfile, threads, use_offset):
+def create_mesh_file(center_lat_lon, angular_extents, pixels_per_degree, dem_path, base_sphere_radius, scale, img_path, outfile, threads, use_offset, skip_texture):
     import multiprocessing as mp
     import PIL.Image as Image
     import pickle
@@ -45,6 +48,7 @@ def create_mesh_file(center_lat_lon, angular_extents, pixels_per_degree, dem_pat
     lat_range = [min_lat + pxl_idx / pixels_per_degree for pxl_idx in range(image_pixel_height)]
     min_lon = center_lat_lon[1] - angular_extents[1] / 2
     lon_range = [min_lon + pxl_idx / pixels_per_degree for pxl_idx in range(image_pixel_width)]
+    
     print("Generating vertices")
     # get the value of the dem pixel at the center lat lon
     with mp.Pool(threads) as pool:
@@ -75,33 +79,34 @@ def create_mesh_file(center_lat_lon, angular_extents, pixels_per_degree, dem_pat
     del verts
     del edges
     del faces
-    print("Generating texture")
-    # lower left uv
-    base_uv = lat_lon_to_uv(min_lat, min_lon, wrap=False)
-    # upper right uv
-    extent_uv = lat_lon_to_uv(min_lat + angular_extents[0], min_lon + angular_extents[1], wrap=False)
-    # cut out the region defined by the uvs in the img_path
-    with Image.open(img_path) as img:
-        # create a 3x3 grid of the image with the top and bottom rows flipped form the original image
-        with Image.new("RGB", (img.size[0] * 3, img.size[1] * 3)) as img_mosaic:
-            img_mosaic.paste(img.transpose(Image.FLIP_TOP_BOTTOM), (img.size[0] // 2, 0))
-            img_mosaic.paste(img.transpose(Image.FLIP_TOP_BOTTOM), (3 * img.size[0] // 2, 0))
-            img_mosaic.paste(img, (0, img.size[1]))
-            img_mosaic.paste(img, (img.size[0], img.size[1]))
-            img_mosaic.paste(img, (2*img.size[0], img.size[1]))
-            img_mosaic.paste(img.transpose(Image.FLIP_TOP_BOTTOM), (img.size[0] // 2, 2 * img.size[1]))
-            img_mosaic.paste(img.transpose(Image.FLIP_TOP_BOTTOM), (3 * img.size[0] // 2, 2 * img.size[1]))
+    if not skip_texture:
+        print("Generating texture")
+        # lower left uv
+        base_uv = lat_lon_to_uv(min_lat, min_lon)
+        # upper right uv
+        extent_uv = lat_lon_to_uv(min_lat + angular_extents[0], min_lon + angular_extents[1])
+        # cut out the region defined by the uvs in the img_path
+        with Image.open(img_path) as img:
+            # create a 3x3 grid of the image with the top and bottom rows flipped form the original image
+            with Image.new("RGB", (img.size[0] * 3, img.size[1] * 3)) as img_mosaic:
+                img_mosaic.paste(img.transpose(Image.FLIP_TOP_BOTTOM), (img.size[0] // 2, 0))
+                img_mosaic.paste(img.transpose(Image.FLIP_TOP_BOTTOM), (3 * img.size[0] // 2, 0))
+                img_mosaic.paste(img, (0, img.size[1]))
+                img_mosaic.paste(img, (img.size[0], img.size[1]))
+                img_mosaic.paste(img, (2*img.size[0], img.size[1]))
+                img_mosaic.paste(img.transpose(Image.FLIP_TOP_BOTTOM), (img.size[0] // 2, 2 * img.size[1]))
+                img_mosaic.paste(img.transpose(Image.FLIP_TOP_BOTTOM), (3 * img.size[0] // 2, 2 * img.size[1]))
 
-            # crop the image to the region defined by the uvs while correcting for the new image mosaic
-            base_uv = (base_uv[0] + 1, base_uv[1] + 1)
-            extent_uv = (extent_uv[0] + 1, extent_uv[1] + 1)
+                # crop the image to the region defined by the uvs while correcting for the new image mosaic
+                base_uv = (base_uv[0] + 1, base_uv[1] + 1)
+                extent_uv = (extent_uv[0] + 1, extent_uv[1] + 1)
 
-            left = img.size[0] * base_uv[0]
-            right = img.size[0] * extent_uv[0]
-            top = img_mosaic.size[1] - img.size[1] * extent_uv[1]
-            bottom = img_mosaic.size[1] - img.size[1] * base_uv[1]
-            img_crop = img_mosaic.crop((left, top, right, bottom))
-            img_crop.save(f"{outfile}.TIF")
+                left = img.size[0] * base_uv[0]
+                right = img.size[0] * extent_uv[0]
+                top = img_mosaic.size[1] - img.size[1] * extent_uv[1]
+                bottom = img_mosaic.size[1] - img.size[1] * base_uv[1]
+                img_crop = img_mosaic.crop((left, top, right, bottom))
+                img_crop.save(f"{outfile}.TIF")
 
 
 def create_moon(meshfile="moon_mesh"):
@@ -190,6 +195,7 @@ if __name__ == "__main__":
     parser.add_argument('--output', type=str, default="moon_mesh", help="The base of output filenames. The mesh will be saved as <output>.pkl and the texture will be saved as <output>.TIF. Defaults to moon_mesh")
     parser.add_argument('--threads', type=int, default=1, help="The number of threads to use. Defaults to 1")
     parser.add_argument('--use-offset', action='store_true', default=False, help="Places mesh's center at (0,0,0) and rotates the mesh so it is roughly parallel to the xy plane. Defaults to False")
+    parser.add_argument('--skip-texture', action='store_true', default=False, help="Skips the texture generation step. Defaults to False")
 
     args = parser.parse_args()
-    create_mesh_file(args.latlon, args.angular_extents, args.pixels_per_degree, args.dem_path, args.base_sphere_radius, args.scale, args.img_path, args.output, args.threads, args.use_offset)
+    create_mesh_file(args.latlon, args.angular_extents, args.pixels_per_degree, args.dem_path, args.base_sphere_radius, args.scale, args.img_path, args.output, args.threads, args.use_offset, args.skip_texture)
