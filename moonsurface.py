@@ -3,24 +3,45 @@ import math
 def lat_lon_to_uv(lat, lon):
     return (lon / 360 + 0.5, 0.5 + lat / 180)
 
-def process_pixel(lat, lon, img, center_lat_lon, base_radius, scale, offset):
-    # sanitize latitude and longitude
-    if lat > 90:
-        lat = 180 - lat
-        lon += 180
-    elif lat < -90:
-        lat = -180 - lat
-        lon += 180
-    lon = (lon + 180) % 360 - 180
-    # convert the lat lon to uv coordinates
-    uvs = lat_lon_to_uv(lat, lon)
-    dem_x = (img.size[0] * uvs[0]) % img.size[0]
-    dem_y = (img.size[1] - img.size[1] * uvs[1]) % img.size[1]
+def cutout_img_lat_lon(min_latlon, max_latlon, img_path):
+    from PIL import Image
+    Image.MAX_IMAGE_PIXELS = None
+    base_uv = lat_lon_to_uv(min_latlon[0], min_latlon[1])
+    # upper right uv
+    extent_uv = lat_lon_to_uv(max_latlon[0], max_latlon[1])
+    # cut out the region defined by the uvs in the img_path
+    with Image.open(img_path) as img:
+        # create a 3x3 grid of the image with the top and bottom rows flipped form the original image
+        with Image.new("RGB", (img.size[0] * 3, img.size[1] * 3)) as img_mosaic:
+            img_mosaic.paste(img.transpose(Image.FLIP_TOP_BOTTOM), (img.size[0] // 2, 0))
+            img_mosaic.paste(img.transpose(Image.FLIP_TOP_BOTTOM), (3 * img.size[0] // 2, 0))
+            img_mosaic.paste(img, (0, img.size[1]))
+            img_mosaic.paste(img, (img.size[0], img.size[1]))
+            img_mosaic.paste(img, (2*img.size[0], img.size[1]))
+            img_mosaic.paste(img.transpose(Image.FLIP_TOP_BOTTOM), (img.size[0] // 2, 2 * img.size[1]))
+            img_mosaic.paste(img.transpose(Image.FLIP_TOP_BOTTOM), (3 * img.size[0] // 2, 2 * img.size[1]))
+
+            # crop the image to the region defined by the uvs while correcting for the new image mosaic
+            base_uv = (base_uv[0] + 1, base_uv[1] + 1)
+            extent_uv = (extent_uv[0] + 1, extent_uv[1] + 1)
+
+            left = img.size[0] * base_uv[0]
+            right = img.size[0] * extent_uv[0]
+            top = img_mosaic.size[1] - img.size[1] * extent_uv[1]
+            bottom = img_mosaic.size[1] - img.size[1] * base_uv[1]
+            return img_mosaic.crop((left, top, right, bottom))
+
+def process_pixel(lat_lon, min_lat_lon, angular_extents, img, center_lat_lon, base_radius, scale, offset):
+    dlat = (lat_lon[0] - min_lat_lon[0]) / angular_extents[0]
+    dlon = (lat_lon[1] - min_lat_lon[1]) / angular_extents[1]
     
+    # convert the lat lon to uv coordinates
+    dem_x = (img.size[0] * dlon) % img.size[0]
+    dem_y = (img.size[1] - img.size[1] * dlat) % img.size[1]
     dem_pixel = (img.getpixel((dem_x, dem_y)) + base_radius) * scale
-    x = dem_pixel * math.cos(math.radians(lat)) * math.cos(math.radians(lon))
-    y = dem_pixel * math.cos(math.radians(lat)) * math.sin(math.radians(lon))
-    z = dem_pixel * math.sin(math.radians(lat))
+    x = dem_pixel * math.cos(math.radians(lat_lon[0])) * math.cos(math.radians(lat_lon[1]))
+    y = dem_pixel * math.cos(math.radians(lat_lon[0])) * math.sin(math.radians(lat_lon[1]))
+    z = dem_pixel * math.sin(math.radians(lat_lon[0]))
     if not offset:
         return (x,y,z)
     if offset != 0:
@@ -51,15 +72,21 @@ def create_mesh_file(center_lat_lon, angular_extents, pixels_per_degree, dem_pat
     
     print("Generating vertices")
     # get the value of the dem pixel at the center lat lon
+    with Image.open(dem_path) as img:
+        center_value = 0
+        if use_offset:
+            center_latlon_uv = lat_lon_to_uv(center_lat_lon[0], center_lat_lon[1])
+            center_x = (img.size[0] * center_latlon_uv[0]) % img.size[0]
+            center_y = (img.size[1] - img.size[1] * center_latlon_uv[1]) % img.size[1]
+            center_value = img.getpixel((center_x, center_y))
+        # crop the image to the region defined by the uvs
+        left = img.size[0] * lat_lon_to_uv(min_lat, min_lon)[0]
+        right = img.size[0] * lat_lon_to_uv(min_lat + angular_extents[0], min_lon + angular_extents[1])[0]
+        top = img.size[1] - img.size[1] * lat_lon_to_uv(min_lat + angular_extents[0], min_lon + angular_extents[1])[1]
+        bottom = img.size[1] - img.size[1] * lat_lon_to_uv(min_lat, min_lon)[1]
+        img_crop = img.crop((left, top, right, bottom))
     with mp.Pool(threads) as pool:
-        with Image.open(dem_path) as img:
-            center_value = 0
-            if use_offset:
-                center_latlon_uv = lat_lon_to_uv(center_lat_lon[0], center_lat_lon[1])
-                center_x = (img.size[0] * center_latlon_uv[0]) % img.size[0]
-                center_y = (img.size[1] - img.size[1] * center_latlon_uv[1]) % img.size[1]
-                center_value = img.getpixel((center_x, center_y))
-            verts = pool.starmap(process_pixel, [(lat, lon, img, center_lat_lon, base_sphere_radius, scale, center_value) for lat in lat_range for lon in lon_range])
+        verts = pool.starmap(process_pixel, [((lat, lon), (min_lat, min_lon), angular_extents, img_crop, center_lat_lon, base_sphere_radius, scale, center_value) for lat in lat_range for lon in lon_range])
     # connect the edges
     edges = []
     # latitude edges
@@ -82,31 +109,8 @@ def create_mesh_file(center_lat_lon, angular_extents, pixels_per_degree, dem_pat
     if not skip_texture:
         print("Generating texture")
         # lower left uv
-        base_uv = lat_lon_to_uv(min_lat, min_lon)
-        # upper right uv
-        extent_uv = lat_lon_to_uv(min_lat + angular_extents[0], min_lon + angular_extents[1])
-        # cut out the region defined by the uvs in the img_path
-        with Image.open(img_path) as img:
-            # create a 3x3 grid of the image with the top and bottom rows flipped form the original image
-            with Image.new("RGB", (img.size[0] * 3, img.size[1] * 3)) as img_mosaic:
-                img_mosaic.paste(img.transpose(Image.FLIP_TOP_BOTTOM), (img.size[0] // 2, 0))
-                img_mosaic.paste(img.transpose(Image.FLIP_TOP_BOTTOM), (3 * img.size[0] // 2, 0))
-                img_mosaic.paste(img, (0, img.size[1]))
-                img_mosaic.paste(img, (img.size[0], img.size[1]))
-                img_mosaic.paste(img, (2*img.size[0], img.size[1]))
-                img_mosaic.paste(img.transpose(Image.FLIP_TOP_BOTTOM), (img.size[0] // 2, 2 * img.size[1]))
-                img_mosaic.paste(img.transpose(Image.FLIP_TOP_BOTTOM), (3 * img.size[0] // 2, 2 * img.size[1]))
-
-                # crop the image to the region defined by the uvs while correcting for the new image mosaic
-                base_uv = (base_uv[0] + 1, base_uv[1] + 1)
-                extent_uv = (extent_uv[0] + 1, extent_uv[1] + 1)
-
-                left = img.size[0] * base_uv[0]
-                right = img.size[0] * extent_uv[0]
-                top = img_mosaic.size[1] - img.size[1] * extent_uv[1]
-                bottom = img_mosaic.size[1] - img.size[1] * base_uv[1]
-                img_crop = img_mosaic.crop((left, top, right, bottom))
-                img_crop.save(f"{outfile}.TIF")
+        img_crop = cutout_img_lat_lon((min_lat, min_lon), (min_lat + angular_extents[0], min_lon + angular_extents[1]), img_path)
+        img_crop.save(f"{outfile}.TIF")
 
 
 def create_moon(meshfile="moon_mesh"):
