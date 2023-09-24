@@ -58,10 +58,14 @@ def process_pixel(lat_lon, min_lat_lon, angular_extents, img, center_lat_lon, ba
         
         return (global_x, global_y, global_z - (offset + base_radius) * scale)
 
-def create_mesh_file(center_lat_lon, angular_extents, pixels_per_degree, dem_path, base_sphere_radius, scale, img_path, outfile, threads, use_offset, skip_texture):
+def create_mesh_file(center_lat_lon, angular_extents, pixels_per_degree, dem_path, base_sphere_radius, scale, img_path, outfile, threads, use_offset, skip_texture, date, time, ephemeris_path):
     import multiprocessing as mp
     import PIL.Image as Image
     import pickle
+    from jplephem.spk import SPK
+    import datetime
+    import jdcal
+
     Image.MAX_IMAGE_PIXELS = None
     image_pixel_height = angular_extents[0] * pixels_per_degree
     image_pixel_width = angular_extents[1] * pixels_per_degree
@@ -71,14 +75,15 @@ def create_mesh_file(center_lat_lon, angular_extents, pixels_per_degree, dem_pat
     lon_range = [min_lon + pxl_idx / pixels_per_degree for pxl_idx in range(image_pixel_width)]
     
     print("Generating vertices")
+    center_value = 0
     # get the value of the dem pixel at the center lat lon
     with Image.open(dem_path) as img:
-        center_value = 0
         if use_offset:
             center_latlon_uv = lat_lon_to_uv(center_lat_lon[0], center_lat_lon[1])
             center_x = (img.size[0] * center_latlon_uv[0]) % img.size[0]
             center_y = (img.size[1] - img.size[1] * center_latlon_uv[1]) % img.size[1]
             center_value = img.getpixel((center_x, center_y))
+
         # crop the image to the region defined by the uvs
         left = img.size[0] * lat_lon_to_uv(min_lat, min_lon)[0]
         right = img.size[0] * lat_lon_to_uv(min_lat + angular_extents[0], min_lon + angular_extents[1])[0]
@@ -101,11 +106,45 @@ def create_mesh_file(center_lat_lon, angular_extents, pixels_per_degree, dem_pat
     for lat_idx in range(image_pixel_height - 1):
         row_offset = lat_idx * image_pixel_width
         faces.extend([(lon_idx + row_offset, lon_idx + row_offset + 1, lon_idx + row_offset + 1 + image_pixel_width, lon_idx + row_offset + image_pixel_width) for lon_idx in range(image_pixel_width-1)])
+    
+    # calculate the sun angle
+    sun_rot = (45,45,0)
+    if date is not None and time is not None and ephemeris_path is not None:
+        print("Calculating sun angle")
+        dt = datetime.datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M:%S")
+        jt = jdcal.gcal2jd(dt.year, dt.month, dt.day)
+        jul = jt[0] + jt[1] + ((dt.hour + 12) % 24) / 24 + dt.minute / (24 * 60) + dt.second / (24 * 60 * 60)
+        with SPK.open(ephemeris_path) as ephemeris:
+            # position of the sun relative to the moon
+            sun_to_earth = ephemeris[0, 3].compute(jul)
+            earth_to_moon = ephemeris[3, 301].compute(jul)
+            moon_to_sun = [earth_to_moon[i] + sun_to_earth[i] for i in range(3)]
+            # find the angle of the sun relative to the direction the mesh is oriented
+            if use_offset:
+                # rotate the moon_to_sun vector by -center lon degrees around the z axis
+                rot = math.radians(center_lat_lon[1])
+                rotated_x = moon_to_sun[0] * math.cos(rot) + moon_to_sun[1] * math.sin(rot)
+                rotated_y = -moon_to_sun[0] * math.sin(rot) + moon_to_sun[1] * math.cos(rot)
+                rotated_z = moon_to_sun[2]
+                
+                # rotate the moon_to_sun vector by -(90 - center lat) degrees around the y axis
+                rot = math.radians(-(90 - center_lat_lon[0]))
+                moon_to_sun[0] = rotated_x * math.cos(rot) + rotated_z * math.sin(rot)
+                moon_to_sun[1] = rotated_y
+                moon_to_sun[2] = -rotated_x * math.sin(rot) + rotated_z * math.cos(rot)
+            # calculate the angle of the sun
+            sun_rot_x = math.atan2(moon_to_sun[1], moon_to_sun[2])
+            sun_rot_y = math.atan2(moon_to_sun[0], moon_to_sun[2])
+            sun_rot_z = 0
+            sun_rot = (sun_rot_x, sun_rot_y, sun_rot_z)
+    print("Saving to file")
     with open(f"{outfile}.pkl", "wb") as f:
-        pickle.dump({"verts": verts, "edges": edges, "faces": faces, "faces_width": image_pixel_width - 1, "faces_height": image_pixel_height - 1}, f)
+        pickle.dump({"verts": verts, "edges": edges, "faces": faces, "faces_width": image_pixel_width - 1, "faces_height": image_pixel_height - 1, "sun_rot": sun_rot}, f)
     del verts
     del edges
     del faces
+
+    # generate the texture
     if not skip_texture:
         print("Generating texture")
         # lower left uv
@@ -185,6 +224,17 @@ def create_moon(meshfile="moon_mesh"):
         for loop_idx, loop in enumerate(face.loop_indices):
             moon_uv.data[loop].uv = face_uv[loop_idx]
     
+    # set the angle of the sun
+    if "Sun" in bpy.data.objects:
+        bpy.data.objects["Sun"].rotation_euler = mesh["sun_rot"][0], mesh["sun_rot"][1], mesh["sun_rot"][2]
+    else:
+        sunlight = bpy.data.lights.new(name="Sun", type="SUN")
+        sunobject = bpy.data.objects.new(name="Sun", object_data=sunlight)
+        bpy.context.collection.objects.link(sunobject)
+        sunobject.rotation_euler = mesh["sun_rot"][0], mesh["sun_rot"][1], mesh["sun_rot"][2]
+        sunobject.location = (0,0,0)
+        sunobject.data.energy = 1360
+        sunobject.data.angle = math.radians(0.526)
 
 if __name__ == "__main__":
     import argparse
@@ -200,6 +250,9 @@ if __name__ == "__main__":
     parser.add_argument('--threads', type=int, default=1, help="The number of threads to use. Defaults to 1")
     parser.add_argument('--use-offset', action='store_true', default=False, help="Places mesh's center at (0,0,0) and rotates the mesh so it is roughly parallel to the xy plane. Defaults to False")
     parser.add_argument('--skip-texture', action='store_true', default=False, help="Skips the texture generation step. Defaults to False")
+    parser.add_argument('--date', type=str, default=None, help="The UTC date to use for the sun angle. Must be YYYY-MM-DD")
+    parser.add_argument('--time', type=str, default=None, help="The UTC time to use for the sun angle. Must be HH:MM:SS")
+    parser.add_argument('--ephemeris-path', type=str, default=None, help="The path to the ephemeris file.")
 
     args = parser.parse_args()
-    create_mesh_file(args.latlon, args.angular_extents, args.pixels_per_degree, args.dem_path, args.base_sphere_radius, args.scale, args.img_path, args.output, args.threads, args.use_offset, args.skip_texture)
+    create_mesh_file(args.latlon, args.angular_extents, args.pixels_per_degree, args.dem_path, args.base_sphere_radius, args.scale, args.img_path, args.output, args.threads, args.use_offset, args.skip_texture, args.date, args.time, args.ephemeris_path)

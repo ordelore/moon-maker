@@ -14,6 +14,8 @@ For my videos, I started with the DEM and diffuse data from NASA's Goddard Space
 
 Later, I stitched DTM data from the LROC accessible at <https://wms.lroc.asu.edu/lroc/view_rdr/WAC_GLD100>.
 
+I use JOL's planetary ephemeris from <https://ssd.jpl.nasa.gov/ftp/eph/planets/bsp/>.
+
 Due to large file sizes, none of the source data is included in this repo. You will need to download the data yourself.
 
 ## Limitations
@@ -25,7 +27,9 @@ The source textures must be cylindrical projections centered at (0,0). The outpu
 First, run the following command to generate a `.pkl` file containing the mesh data
 
 ```bash
-usage: python3 moonsurface.py [-h] --latlon LAT LON --angular-extents LAT_EXTENT LON_EXTENT --pixels-per-degree PIXELS_PER_DEGREE --dem-path DEM_PATH --img-path IMG_PATH --base-sphere-radius BASE_SPHERE_RADIUS [--scale SCALE] [--output OUTPUT] [--threads THREADS] [--use-offset]
+usage: moonsurface.py [-h] --latlon LATLON LATLON --angular-extents ANGULAR_EXTENTS ANGULAR_EXTENTS --pixels-per-degree PIXELS_PER_DEGREE --dem-path DEM_PATH --img-path
+                      IMG_PATH --base-sphere-radius BASE_SPHERE_RADIUS [--scale SCALE] [--output OUTPUT] [--threads THREADS] [--use-offset] [--skip-texture] [--date DATE]
+                      [--time TIME] [--ephemeris-path EPHEMERIS_PATH]
 
 Create a mesh from a DEM
 
@@ -45,6 +49,11 @@ options:
   --output OUTPUT       The base of output filenames. The mesh will be saved as <output>.pkl and the texture will be saved as <output>.TIF. Defaults to moon_mesh
   --threads THREADS     The number of threads to use. Defaults to 1
   --use-offset          Places mesh's center at (0,0,0) and rotates the mesh so it is roughly parallel to the xy plane. Defaults to False
+  --skip-texture        Skips the texture generation step. Defaults to False
+  --date DATE           The UTC date to use for the sun angle. Must be YYYY-MM-DD
+  --time TIME           The UTC time to use for the sun angle. Must be HH:MM:SS
+  --ephemeris-path EPHEMERIS_PATH
+                        The path to the ephemeris file.
 ```
 
 After creating the file, create a Blender file and save it in the same directory as the repo. In the `Scripting` tab, open the `load_moon.py` script. If you used a different output name, change the `MESH_NAME` variable so it is the same as the one you used. Then, you can run the script to load the generated mesh into Blender.
