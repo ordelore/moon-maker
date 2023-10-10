@@ -58,7 +58,7 @@ def process_pixel(lat_lon, min_lat_lon, angular_extents, img, center_lat_lon, ba
         
         return (global_x, global_y, global_z - (offset + base_radius) * scale)
 
-def create_mesh_file(center_lat_lon, angular_extents, pixels_per_degree, dem_path, base_sphere_radius, scale, img_path, outfile, threads, use_offset, skip_texture, date, time, ephemeris_path):
+def create_mesh_file(center_lat_lon, angular_extents, pixels_per_degree, dem_path, base_sphere_radius, scale, img_path, outfile, threads, use_offset, skip_texture, date, time, ephemeris_path, skip_mesh):
     import multiprocessing as mp
     import PIL.Image as Image
     import pickle
@@ -76,36 +76,40 @@ def create_mesh_file(center_lat_lon, angular_extents, pixels_per_degree, dem_pat
     
     print("Generating vertices")
     center_value = 0
-    # get the value of the dem pixel at the center lat lon
-    with Image.open(dem_path) as img:
-        if use_offset:
-            center_latlon_uv = lat_lon_to_uv(center_lat_lon[0], center_lat_lon[1])
-            center_x = (img.size[0] * center_latlon_uv[0]) % img.size[0]
-            center_y = (img.size[1] - img.size[1] * center_latlon_uv[1]) % img.size[1]
-            center_value = img.getpixel((center_x, center_y))
+    verts, edges, faces = [], [], []
+    if not(skip_mesh):
+        # get the value of the dem pixel at the center lat lon
+        with Image.open(dem_path) as img:
+            if use_offset:
+                center_latlon_uv = lat_lon_to_uv(center_lat_lon[0], center_lat_lon[1])
+                center_x = (img.size[0] * center_latlon_uv[0]) % img.size[0]
+                center_y = (img.size[1] - img.size[1] * center_latlon_uv[1]) % img.size[1]
+                center_value = img.getpixel((center_x, center_y))
 
-        # crop the image to the region defined by the uvs
-        left = img.size[0] * lat_lon_to_uv(min_lat, min_lon)[0]
-        right = img.size[0] * lat_lon_to_uv(min_lat + angular_extents[0], min_lon + angular_extents[1])[0]
-        top = img.size[1] - img.size[1] * lat_lon_to_uv(min_lat + angular_extents[0], min_lon + angular_extents[1])[1]
-        bottom = img.size[1] - img.size[1] * lat_lon_to_uv(min_lat, min_lon)[1]
-        img_crop = img.crop((left, top, right, bottom))
-    with mp.Pool(threads) as pool:
-        verts = pool.starmap(process_pixel, [((lat, lon), (min_lat, min_lon), angular_extents, img_crop, center_lat_lon, base_sphere_radius, scale, center_value) for lat in lat_range for lon in lon_range])
-    # connect the edges
-    edges = []
-    # latitude edges
-    for lat_idx in range(image_pixel_height - 1):
-        row_offset = lat_idx * image_pixel_width
-        edges.extend([(lon_idx + row_offset, lon_idx + row_offset + 1) for lon_idx in range(image_pixel_width - 1)])
-    # longitude edges
-    for lon_idx in range(image_pixel_width - 1):
-        edges.extend([(lon_idx + image_pixel_width * lat_idx, lon_idx + image_pixel_width * (lat_idx+1)) for lat_idx in range(image_pixel_height - 1)])
-    # faces
-    faces = []
-    for lat_idx in range(image_pixel_height - 1):
-        row_offset = lat_idx * image_pixel_width
-        faces.extend([(lon_idx + row_offset, lon_idx + row_offset + 1, lon_idx + row_offset + 1 + image_pixel_width, lon_idx + row_offset + image_pixel_width) for lon_idx in range(image_pixel_width-1)])
+            # crop the image to the region defined by the uvs
+            left = img.size[0] * lat_lon_to_uv(min_lat, min_lon)[0]
+            right = img.size[0] * lat_lon_to_uv(min_lat + angular_extents[0], min_lon + angular_extents[1])[0]
+            top = img.size[1] - img.size[1] * lat_lon_to_uv(min_lat + angular_extents[0], min_lon + angular_extents[1])[1]
+            bottom = img.size[1] - img.size[1] * lat_lon_to_uv(min_lat, min_lon)[1]
+            img_crop = img.crop((left, top, right, bottom))
+        with mp.Pool(threads) as pool:
+            verts = pool.starmap(process_pixel, [((lat, lon), (min_lat, min_lon), angular_extents, img_crop, center_lat_lon, base_sphere_radius, scale, center_value) for lat in lat_range for lon in lon_range])
+        # connect the edges
+        print("Generating edges")
+        edges = []
+        # latitude edges
+        for lat_idx in range(image_pixel_height - 1):
+            row_offset = lat_idx * image_pixel_width
+            edges.extend([(lon_idx + row_offset, lon_idx + row_offset + 1) for lon_idx in range(image_pixel_width - 1)])
+        # longitude edges
+        for lon_idx in range(image_pixel_width - 1):
+            edges.extend([(lon_idx + image_pixel_width * lat_idx, lon_idx + image_pixel_width * (lat_idx+1)) for lat_idx in range(image_pixel_height - 1)])
+        # faces
+        print("Generating faces")
+        faces = []
+        for lat_idx in range(image_pixel_height - 1):
+            row_offset = lat_idx * image_pixel_width
+            faces.extend([(lon_idx + row_offset, lon_idx + row_offset + 1, lon_idx + row_offset + 1 + image_pixel_width, lon_idx + row_offset + image_pixel_width) for lon_idx in range(image_pixel_width-1)])
     
     # calculate the sun angle
     sun_rot = (45,45,0)
@@ -152,7 +156,7 @@ def create_mesh_file(center_lat_lon, angular_extents, pixels_per_degree, dem_pat
         img_crop.save(f"{outfile}.TIF")
 
 
-def create_moon(meshfile="moon_mesh"):
+def create_moon(meshfile="moon_mesh", use_cpp=False):
     import bpy
     import pickle
     import os
@@ -166,8 +170,28 @@ def create_moon(meshfile="moon_mesh"):
     print(f"Mesh contains {len(mesh['verts'])} vertices")
     
     moon_mesh = bpy.data.meshes.new("MoonMesh")
-    moon_mesh.from_pydata(mesh["verts"], mesh["edges"], mesh["faces"])
-
+    if not use_cpp:
+        # the number of faces in the width of the mesh
+        faces_width = mesh["faces_width"]
+        # the number of faces in the height of the mesh
+        faces_height = mesh["faces_height"]
+        moon_mesh.from_pydata(mesh["verts"], mesh["edges"], mesh["faces"])
+    else:
+        with open(os.path.join(os.path.dirname(__file__), f"{meshfile}.mesh")) as cpp_output:
+            meshlines = cpp_output.read().splitlines()
+            vertices_width, vertices_height = [int(x) for x in meshlines[0].split(" ")]
+            faces_width = vertices_width - 1
+            faces_height = vertices_height - 1
+            number_of_vertices = vertices_width * vertices_height
+            number_of_edges = (vertices_width) * (vertices_height - 1) + (vertices_width - 1) * (vertices_height)
+            vertex_lines = meshlines[1:number_of_vertices + 1]
+            edges_lines = meshlines[number_of_vertices + 1:number_of_vertices + 1 + number_of_edges]
+            faces_lines = meshlines[number_of_vertices + 1 + number_of_edges:]
+            vertices = [[float(x) for x in line.split(" ")] for line in vertex_lines]
+            edges = [[int(x) for x in line.split(" ")] for line in edges_lines]
+            faces = [[int(x) for x in line.split(" ")] for line in faces_lines]
+            moon_mesh.from_pydata(vertices, edges, faces)
+            
     moon_object = bpy.data.objects.new("MoonObject", moon_mesh)
     bpy.context.collection.objects.link(moon_object)
     if f"{meshfile}.TIF" in bpy.data.images:
@@ -201,10 +225,7 @@ def create_moon(meshfile="moon_mesh"):
     base_uv = (0,0)
     # the upper right corner of the uv map for the whole mesh
     extent_uv = (1,1)
-    # the number of faces in the width of the mesh
-    faces_width = mesh["faces_width"]
-    # the number of faces in the height of the mesh
-    faces_height = mesh["faces_height"]
+
     # for each face, calculate the uv coordinates
     for face in moon_mesh.polygons:
         # the face index
@@ -241,7 +262,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Create a mesh from a DEM')
     parser.add_argument('--latlon', type=int, nargs=2, required=True, help="The latitude and longitude of the center of the mesh")
     parser.add_argument('--angular-extents', type=int, nargs=2, required=True, help="The angular extents of the mesh in degrees")
-    parser.add_argument('--pixels-per-degree', type=int, required=True, help="The number of pixels per degree in the DEM")
+    parser.add_argument('--pixels-per-degree', type=int, required=True, help="The number of vertices per degree in the DEM")
     parser.add_argument('--dem-path', type=str, required=True, help="The path to the DEM")
     parser.add_argument('--img-path', type=str, required=True, help="The path to the diffuse texture image")
     parser.add_argument('--base-sphere-radius', type=float, required=True, help="The radius of the base sphere")
@@ -250,9 +271,10 @@ if __name__ == "__main__":
     parser.add_argument('--threads', type=int, default=1, help="The number of threads to use. Defaults to 1")
     parser.add_argument('--use-offset', action='store_true', default=False, help="Places mesh's center at (0,0,0) and rotates the mesh so it is roughly parallel to the xy plane. Defaults to False")
     parser.add_argument('--skip-texture', action='store_true', default=False, help="Skips the texture generation step. Defaults to False")
+    parser.add_argument('--skip-mesh', action='store_true', default=False, help="Skips the mesh generation step. Defaults to False. Useful if using the c++ program")
     parser.add_argument('--date', type=str, default=None, help="The UTC date to use for the sun angle. Must be YYYY-MM-DD")
     parser.add_argument('--time', type=str, default=None, help="The UTC time to use for the sun angle. Must be HH:MM:SS")
     parser.add_argument('--ephemeris-path', type=str, default=None, help="The path to the ephemeris file.")
 
     args = parser.parse_args()
-    create_mesh_file(args.latlon, args.angular_extents, args.pixels_per_degree, args.dem_path, args.base_sphere_radius, args.scale, args.img_path, args.output, args.threads, args.use_offset, args.skip_texture, args.date, args.time, args.ephemeris_path)
+    create_mesh_file(args.latlon, args.angular_extents, args.pixels_per_degree, args.dem_path, args.base_sphere_radius, args.scale, args.img_path, args.output, args.threads, args.use_offset, args.skip_texture, args.date, args.time, args.ephemeris_path, args.skip_mesh)
