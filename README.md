@@ -2,10 +2,19 @@
 
 ## Installation
 
-After cloning this repo into a folder, run the following commands to install the dependencies:
+After cloning this repo into a folder, run the following command to install the Python dependencies:
 
 ```bash
 pip3 install -r requirements.txt
+```
+
+To compile the C++ components, ensure that the `gdal`, `cxxopts`, and `libtiff` libraries are installed. Then go into the `cpp` directory and run the following commands:
+
+```bash
+mkdir build
+cd build
+cmake ..
+make
 ```
 
 ## Source Data
@@ -24,11 +33,32 @@ The source textures must be cylindrical projections centered at (0,0). The outpu
 
 ## Usage
 
-First, run the following command to generate a `.pkl` file containing the mesh data
+First, you will need to generate a mesh from the DEM. To do this, run `./cpp/build/MoonSurface` with the following arguments:
 
-```bash
-usage: moonsurface.py [-h] --latlon LATLON LATLON --angular-extents ANGULAR_EXTENTS ANGULAR_EXTENTS --pixels-per-degree PIXELS_PER_DEGREE --dem-path DEM_PATH --img-path
-                      IMG_PATH --base-sphere-radius BASE_SPHERE_RADIUS [--scale SCALE] [--output OUTPUT] [--threads THREADS] [--use-offset] [--skip-texture] [--date DATE]
+```text
+A program to generate a moon surface
+Usage:
+  MoonSurface [OPTION...]
+
+      --centerlat arg         Center Latitude
+      --centerlon arg         Center Longitude
+      --latextent arg         Latitude Width
+      --lonextent arg         Longitude Height
+      --verts-per-degree arg  Vertices Per Degree
+      --scale arg             Scale (default: 1.0)
+      --threads arg           Number of threads (default: 1)
+      --rotate-flat           Transform mesh so the center latlon is facing 
+                              z-up
+      --dem-path arg          Path to DEM file. Can be used multiple times 
+                              to load multiple DEM files.
+      --output arg            Output file title (default: moonmesh)
+  -h, --help                  Print help
+```
+
+Next, run `python moonsurface.py` with the following arguments to generate a `.pkl` file containing the sun position and image texture
+
+```text
+usage: moonsurface.py [-h] --latlon LATLON LATLON --angular-extents ANGULAR_EXTENTS ANGULAR_EXTENTS --img-path IMG_PATH [--output OUTPUT] [--rotate-flat] [--date DATE]
                       [--time TIME] [--ephemeris-path EPHEMERIS_PATH]
 
 Create a mesh from a DEM
@@ -39,17 +69,9 @@ options:
                         The latitude and longitude of the center of the mesh
   --angular-extents ANGULAR_EXTENTS ANGULAR_EXTENTS
                         The angular extents of the mesh in degrees
-  --pixels-per-degree PIXELS_PER_DEGREE
-                        The number of pixels per degree in the DEM
-  --dem-path DEM_PATH   The path to the DEM
   --img-path IMG_PATH   The path to the diffuse texture image
-  --base-sphere-radius BASE_SPHERE_RADIUS
-                        The radius of the base sphere
-  --scale SCALE         The scale of the mesh. Defaults to 1
   --output OUTPUT       The base of output filenames. The mesh will be saved as <output>.pkl and the texture will be saved as <output>.TIF. Defaults to moon_mesh
-  --threads THREADS     The number of threads to use. Defaults to 1
-  --use-offset          Places mesh's center at (0,0,0) and rotates the mesh so it is roughly parallel to the xy plane. Defaults to False
-  --skip-texture        Skips the texture generation step. Defaults to False
+  --rotate-flat         Places mesh's center at the origin and rotates the mesh so the center points in the positive z direction. Defaults to False
   --date DATE           The UTC date to use for the sun angle. Must be YYYY-MM-DD
   --time TIME           The UTC time to use for the sun angle. Must be HH:MM:SS
   --ephemeris-path EPHEMERIS_PATH
