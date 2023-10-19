@@ -5,6 +5,7 @@
 #include <pthread.h>
 #include "moonsurface.h"
 #include "dem.h"
+
 void *work_thread(void *state) {
     BagOfState *bag = (BagOfState *) state;
     DEMManager demManager = DEMManager(bag->options->dem_paths);
@@ -13,50 +14,26 @@ void *work_thread(void *state) {
     for (int coord_idx = bag->thread_idx; coord_idx < bag->vertices_height * bag->vertices_width; coord_idx += bag->thread_count) {
         int lat_idx = coord_idx / bag->vertices_width;
         int lon_idx = coord_idx % bag->vertices_width;
-        std::vector<float> vertex;
         float lat = bag->options->min_latlon[0] + lat_idx / bag->options->verts_per_degree;
         float lon = bag->options->min_latlon[1] + lon_idx / bag->options->verts_per_degree;
         if (bag->options->rotate_flat) {
-            vertex = demManager.getCartesian(lat, lon, bag->options->latlon[0], bag->options->latlon[1], center_elevation);
+            demManager.getCartesian(&(*bag->vertices)[coord_idx], lat, lon, bag->options->latlon[0], bag->options->latlon[1], center_elevation, bag->options->scale);
         } else {
-            vertex = demManager.getCartesian(lat, lon);
-        }
-        int vert_idx = lat_idx * bag->vertices_width + lon_idx;
-        (*bag->vertices)[vert_idx] = vertex;
-        if (lat_idx < bag->vertices_height - 1) {
-            int edge_idx = lat_idx * bag->vertices_width + lon_idx;
-            (*bag->edges)[edge_idx] = {vert_idx, vert_idx + bag->vertices_width};
-        }
-        if (lon_idx < bag->vertices_width - 1) {
-            int edge_idx = (bag->vertices_height -1 ) * bag->vertices_width + lat_idx * (bag->vertices_width - 1) + lon_idx;
-            (*bag->edges)[edge_idx] = {vert_idx, vert_idx + 1};
-        }
-        if (lat_idx < bag->vertices_height - 1 && lon_idx < bag->vertices_width - 1) {
-            int face_idx = lat_idx * (bag->vertices_width - 1) + lon_idx;
-            (*bag->faces)[face_idx] = {vert_idx, vert_idx + bag->vertices_width, vert_idx + bag->vertices_width + 1, vert_idx + 1};
+            demManager.getCartesian(&(*bag->vertices)[coord_idx], lat, lon, bag->options->scale);
         }
     }
 
     demManager.close();
-    
     return NULL;
 }
 int create_mesh(MoonSurfaceOptions meshOptions) {
     DEMManager demManager = DEMManager(meshOptions.dem_paths);
-    // prepare file
-    std::ofstream meshFile;
-    meshFile.open(meshOptions.output + ".mesh");
     // write the dimensions of the faces in the file
     int vertices_height = floor(meshOptions.latlon_extent[0] * meshOptions.verts_per_degree) + 1;
     int vertices_width = floor(meshOptions.latlon_extent[1] * meshOptions.verts_per_degree) + 1;
 
-    meshFile << vertices_width << " " << vertices_height << std::endl;
-
     std::cout << "Generating mesh" << std::endl;
-    std::vector<std::vector<float>> vertices(vertices_width * vertices_height);
-    std::vector<std::vector<int>> edges(vertices_width * (vertices_height - 1) + (vertices_width - 1) * vertices_height);
-    std::vector<std::vector<int>> faces((vertices_height - 1) * (vertices_width - 1));
-
+    std::vector<std::array<float, 3>> vertices(vertices_width * vertices_height);
     pthread_t threads[meshOptions.threads];
     BagOfState bags[meshOptions.threads];
     for (int thread_idx = 0; thread_idx < meshOptions.threads; thread_idx++) {
@@ -66,28 +43,36 @@ int create_mesh(MoonSurfaceOptions meshOptions) {
         bags[thread_idx].vertices_height = vertices_height;
         bags[thread_idx].options = &meshOptions;
         bags[thread_idx].vertices = &vertices;
-        bags[thread_idx].edges = &edges;
-        bags[thread_idx].faces = &faces;
         pthread_create(&threads[thread_idx], NULL, work_thread, &bags[thread_idx]);
     }
     // wait for each thread to finish
     for (int thread_idx = 0; thread_idx < meshOptions.threads; thread_idx++) {
         pthread_join(threads[thread_idx], NULL);
     }
+
+    // prepare file
+    std::ofstream meshFile;
+    meshFile.open(meshOptions.output + ".obj");
+
     std::cout << "Writing vertices" << std::endl;
-    for (std::vector<float> vertex : vertices) {
-        meshFile << vertex[0] * meshOptions.scale << " " << vertex[1] * meshOptions.scale << " " << vertex[2] * meshOptions.scale << std::endl;
+    for (std::array<float, 3> vertex : vertices) {
+        meshFile << "v " << vertex[0] << " " << vertex[1] << " " << vertex[2] << std::endl;
     }
 
-    std::cout << "Writing edges" << std::endl;
-    for (std::vector<int> edge : edges) {
-        // std::cout << edge[0] << " " << edge[1] << std::endl;
-        meshFile << edge[0] << " " << edge[1] << std::endl;
+    std::cout << "Writing uvs" << std::endl;
+    for (float lat_idx = 0; lat_idx < vertices_height; lat_idx++) {
+        for (float lon_idx = 0; lon_idx < vertices_width; lon_idx++) {
+            meshFile << "vt " << lon_idx / (vertices_width - 1) << " " << lat_idx / (vertices_height - 1) << std::endl;
+        }
     }
     
     std::cout << "Writing faces" << std::endl;
-    for (std::vector<int> face : faces) {
-        meshFile << face[0] << " " << face[1] << " " << face[2] << " " << face[3] << std::endl;
+    for (int lat_idx = 0; lat_idx < vertices_height - 1; lat_idx++) {
+        for (int lon_idx = 0; lon_idx < vertices_width - 1; lon_idx++) {
+            // OBJ indices are 1-indexed
+            int coord_idx = lat_idx * vertices_width + lon_idx + 1;
+            meshFile << "f " << coord_idx << "/" << coord_idx << " " << coord_idx + vertices_width << "/" << coord_idx + vertices_width << " " << coord_idx + vertices_width + 1 << "/" << coord_idx + vertices_width + 1 << " " << coord_idx + 1 << "/" << coord_idx + 1 << std::endl;
+        }
     }
     
     std::cout << "Done" << std::endl;

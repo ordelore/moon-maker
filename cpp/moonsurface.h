@@ -19,7 +19,5 @@ struct BagOfState {
     int vertices_width;
     int vertices_height;
     MoonSurfaceOptions *options;
-    std::vector<std::vector<float>> *vertices;
-    std::vector<std::vector<int>> *edges;
-    std::vector<std::vector<int>> *faces;
+    std::vector<std::array<float, 3>> *vertices;
 };

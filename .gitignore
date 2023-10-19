@@ -11,3 +11,4 @@ cpp/build
 *.vscode
 *.IMG
 *.aux.xml
+*.obj
