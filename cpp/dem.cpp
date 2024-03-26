@@ -160,8 +160,6 @@ void SingleDEM::close() {
 }
 
 DEMManager::DEMManager(std::vector<std::string> filenames) {
-    GDALAllRegister();
-    
     for (std::string filename : filenames) {
         this->dems.push_back(SingleDEM(filename));
     }

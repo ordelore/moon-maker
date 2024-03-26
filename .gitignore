@@ -12,3 +12,4 @@ cpp/build
 *.IMG
 *.aux.xml
 *.obj
+*.mtl

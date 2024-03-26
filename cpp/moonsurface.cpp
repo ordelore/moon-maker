@@ -1,11 +1,12 @@
 #include <iostream>
 #include <fstream>
-#include <tiffio.h>
 #include <cxxopts.hpp>
 #include <pthread.h>
+#include "gdal_priv.h"
 #include "moonsurface.h"
 #include "dem.h"
 
+using namespace std;
 void *work_thread(void *state) {
     BagOfState *bag = (BagOfState *) state;
     DEMManager demManager = DEMManager(bag->options->dem_paths);
@@ -26,6 +27,7 @@ void *work_thread(void *state) {
     demManager.close();
     return NULL;
 }
+
 int create_mesh(MoonSurfaceOptions meshOptions) {
     DEMManager demManager = DEMManager(meshOptions.dem_paths);
     // write the dimensions of the faces in the file
@@ -53,6 +55,8 @@ int create_mesh(MoonSurfaceOptions meshOptions) {
     // prepare file
     std::ofstream meshFile;
     meshFile.open(meshOptions.output + ".obj");
+    meshFile << "mtllib " << meshOptions.output << ".mtl" << std::endl;
+    meshFile << "usemtl Moon" << std::endl;
 
     std::cout << "Writing vertices" << std::endl;
     for (std::array<float, 3> vertex : vertices) {
@@ -71,12 +75,58 @@ int create_mesh(MoonSurfaceOptions meshOptions) {
         for (int lon_idx = 0; lon_idx < vertices_width - 1; lon_idx++) {
             // OBJ indices are 1-indexed
             int coord_idx = lat_idx * vertices_width + lon_idx + 1;
-            meshFile << "f " << coord_idx << "/" << coord_idx << " " << coord_idx + vertices_width << "/" << coord_idx + vertices_width << " " << coord_idx + vertices_width + 1 << "/" << coord_idx + vertices_width + 1 << " " << coord_idx + 1 << "/" << coord_idx + 1 << std::endl;
+            meshFile << "f " << coord_idx << "/" << coord_idx;
+            meshFile << " " << coord_idx + 1 << "/" << coord_idx + 1;
+            meshFile << " " << coord_idx + vertices_width + 1 << "/" << coord_idx + vertices_width + 1;
+            meshFile << " " << coord_idx + vertices_width << "/" << coord_idx + vertices_width << std::endl;;
         }
     }
     
-    std::cout << "Done" << std::endl;
     meshFile.close();
+
+    std::cout << "Writing .mtl file" << std::endl;
+    std::ofstream mtlFile;
+    mtlFile.open(meshOptions.output + ".mtl");
+    mtlFile << "newmtl Moon" << std::endl;
+    mtlFile << "illum 1" << std::endl;
+    mtlFile << "Ka 1.000 1.000 1.000" << std::endl;
+    mtlFile << "Kd 1.000 1.000 1.000" << std::endl;
+    mtlFile << "Ks 0.000 0.000 0.000" << std::endl;
+    mtlFile << "map_Kd " << meshOptions.output << ".TIF" << std::endl;
+    mtlFile.close();
+
+    std::cout << "Done" << std::endl;
+    return 0;
+}
+
+int create_texture(MoonSurfaceOptions meshOptions) {
+    std::cout << "Cropping texture" << std::endl;
+    GDALDataset *globalTexture = GDALDataset::FromHandle(GDALOpen(meshOptions.texture_path.c_str(), GA_ReadOnly));
+    GDALRasterBand *raster = globalTexture->GetRasterBand(1);
+
+    int texture_width = raster->GetXSize();
+    int texture_height = raster->GetYSize();
+
+    float min_lat_uv = meshOptions.min_latlon[0] / 180.0 + 0.5;
+    float max_lat_uv = (meshOptions.min_latlon[0] + meshOptions.latlon_extent[0]) / 180.0 + 0.5;
+    float min_lon_uv = meshOptions.min_latlon[1] / 360.0 + 0.5;
+    float max_lon_uv = (meshOptions.min_latlon[1] + meshOptions.latlon_extent[1]) / 360.0 + 0.5;
+    
+    int cropped_width = meshOptions.latlon_extent[1] / 360.0f * texture_width;
+    int cropped_height = meshOptions.latlon_extent[0] / 180.0f * texture_height;
+    
+    int min_lat_pixel = texture_height - min_lat_uv * texture_height;
+    int min_lon_pixel = min_lon_uv * texture_width;
+    float *buffer = (float *) CPLMalloc(sizeof(float) * cropped_width * cropped_height);
+    GDALDataset *croppedDataset = globalTexture->GetDriver()->Create((meshOptions.output + ".TIF").c_str(), cropped_width, cropped_height, 1, GDT_Float32, NULL);
+    GDALRasterBand *croppedRaster = croppedDataset->GetRasterBand(1);
+
+    (void)raster->RasterIO(GF_Read, min_lon_pixel, min_lat_pixel - cropped_height, cropped_width, cropped_height, buffer, cropped_width, cropped_height, GDT_Float32, 0, 0);
+    (void)croppedRaster->RasterIO(GF_Write, 0, 0, cropped_width, cropped_height, buffer, cropped_width, cropped_height, GDT_Float32, 0, 0);
+    
+
+    std::cout << "Saving texture" << std::endl;
+    croppedDataset->FlushCache();
     return 0;
 }
 
@@ -90,6 +140,8 @@ int argument_exists(std::string flag, cxxopts::Options options, cxxopts::ParseRe
 }
 
 int main(int argc, char *argv[]) {
+    GDALAllRegister();
+
     cxxopts::Options options("MoonSurface", "A program to generate a moon surface");
     options.add_options()
         ("centerlat", "Center Latitude", cxxopts::value<double>())
@@ -101,6 +153,7 @@ int main(int argc, char *argv[]) {
         ("threads", "Number of threads", cxxopts::value<int>()->default_value("1"))
         ("rotate-flat", "Transform mesh so the center latlon is facing z-up", cxxopts::value<bool>()->default_value("false"))
         ("dem-path", "Path to DEM file. Can be used multiple times to load multiple DEM files.", cxxopts::value<std::vector<std::string>>())
+        ("img-path", "Path to image file.", cxxopts::value<std::string>())
         ("output", "Output file title", cxxopts::value<std::string>()->default_value("moonmesh"))
         ("h,help", "Print help")
         ;
@@ -136,5 +189,11 @@ int main(int argc, char *argv[]) {
     meshOptions.dem_paths = result["dem-path"].as<std::vector<std::string>>();
     meshOptions.output = result["output"].as<std::string>();
 
+    if (argument_exists("img-path", options, result)) {
+        meshOptions.texture_path = result["img-path"].as<std::string>();
+        if (create_texture(meshOptions)) return 1;
+    }
+
     return create_mesh(meshOptions);
+    
 }

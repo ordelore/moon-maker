@@ -11,6 +11,7 @@ struct MoonSurfaceOptions {
     bool rotate_flat;
     std::vector<std::string> dem_paths;
     std::string output;
+    std::string texture_path;
 };
 
 struct BagOfState {
